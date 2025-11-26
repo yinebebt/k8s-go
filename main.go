@@ -10,13 +10,16 @@ import (
 	"time"
 )
 
-func handler(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintln(w, "Hello, Kubernetes!")
+func welcomeHandler(w http.ResponseWriter, _ *http.Request) {
+	_, err := fmt.Fprintln(w, "Hello, Welcome to Kubernetes world!")
+	if err != nil {
+		log.Printf("Error writing response: %v", err)
+	}
 }
 
 func main() {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", handler)
+	mux.HandleFunc("/", welcomeHandler)
 
 	server := &http.Server{
 		Addr:    ":8080",
@@ -28,7 +31,7 @@ func main() {
 	signal.Notify(stop, os.Interrupt)
 
 	go func() {
-		log.Println("go-k8s running at port 8080 ...")
+		log.Println("k8s-go is running at port 8080 ...")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}
