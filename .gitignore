@@ -1,1 +1,7 @@
 .idea
+
+# real Secret values — never commit.
+k8s-secret.yaml
+
+# built binary
+/main
