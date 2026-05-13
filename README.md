@@ -1,10 +1,8 @@
 # k8s-go
 
 [![Docker Image](https://img.shields.io/docker/v/yinebeb/k8s-go?label=docker&logo=docker)](https://hub.docker.com/r/yinebeb/k8s-go)
-[![Docker Pulls](https://img.shields.io/docker/pulls/yinebeb/k8s-go)](https://hub.docker.com/r/yinebeb/k8s-go)
-[![Image Size](https://img.shields.io/docker/image-size/yinebeb/k8s-go/0.2)](https://hub.docker.com/r/yinebeb/k8s-go)
 
-Go HTTP server packaged for Kubernetes. Handles `SIGTERM` with a readiness drain, exposes split `/livez` and `/readyz` probes, logs JSON via `slog`, and checks a Bearer token from a `Secret` on `/hello`. Runtime image is Alpine + the binary (~15 MB).
+Go HTTP server packaged for Kubernetes. Handles `SIGTERM` with a readiness drain, exposes split `/livez` and `/readyz` probes, logs JSON via `slog`, and checks a Bearer token from a `Secret` on `/hello`.
 
 ## Endpoints
 
