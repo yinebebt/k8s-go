@@ -80,10 +80,30 @@ metadata:
   labels:
     app: k8s-go
 spec:
-  type: LoadBalancer     # externally accessible
+  # LoadBalancer asks the cluster for an external IP.
+  type: LoadBalancer
   selector:
     app: k8s-go          # matched pod labels
   ports:
     - protocol: TCP
       port: 80           # external port
       targetPort: http   # named pod port
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8s-go-nodeport
+  labels:
+    app: k8s-go
+spec:
+  # NodePort opens the same port on every node. Works without any LB controller.
+  type: NodePort
+  selector:
+    app: k8s-go
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: http
+      nodePort: 30080
