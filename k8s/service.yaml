@@ -1,0 +1,47 @@
+# Two Services against the same pods so the LoadBalancer vs NodePort paths
+# can be compared side by side. Both select pods via `app: k8s-go`.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8s-go-service
+  namespace: k8s-go
+  labels:
+    app: k8s-go
+    app.kubernetes.io/name: k8s-go
+    app.kubernetes.io/version: "0.2"
+    app.kubernetes.io/part-of: k8s-go-demo
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  # LoadBalancer asks the cluster for an external IP.
+  # Vanilla k8s ships no LB controller — on kind the IP comes from MetalLB
+  # (see metallb-pool.yaml and README §Install MetalLB).
+  type: LoadBalancer
+  selector:
+    app: k8s-go          # matched pod labels
+  ports:
+    - protocol: TCP
+      port: 80           # external port
+      targetPort: http   # named pod port
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8s-go-nodeport
+  namespace: k8s-go
+  labels:
+    app: k8s-go
+    app.kubernetes.io/name: k8s-go
+    app.kubernetes.io/version: "0.2"
+    app.kubernetes.io/part-of: k8s-go-demo
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  # NodePort opens the same port on every node. Works without any LB controller.
+  type: NodePort
+  selector:
+    app: k8s-go
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: http
+      nodePort: 30080

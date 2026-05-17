@@ -1,0 +1,37 @@
+# MetalLB layer-2 config for kind cluster `k8s-go`.
+#
+# Pool range MUST sit inside the cluster's node network. L2 (Layer 2) mode
+# announces VIPs (Virtual IPs) via ARP (Address Resolution Protocol), which
+# only crosses one broadcast domain — for kind that is the `kind` Docker
+# bridge. An IP outside the bridge subnet is unreachable.
+# Other cluster managers (k3d, Minikube, bare metal) put nodes on different
+# networks; pool range must follow. See README §Step 1.
+#
+# Verify the subnet before applying:
+#   docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}'
+#
+# Docker's IPAM (IP Address Management) hands out the low end of the subnet
+# to node containers, so the pool sits at the top of the /16 to avoid
+# collisions. Allocator is deterministic low-to-high — first LB Service gets
+# `.200`.
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: kind-pool
+  namespace: metallb-system
+spec:
+  addresses:
+    - 172.22.255.200-172.22.255.250
+---
+# Without an L2Advertisement nothing ARPs for the pool — IPs get assigned
+# to Services but no node answers for them. Empty `ipAddressPools` would
+# advertise every pool; we scope it explicitly to `kind-pool`.
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: kind-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - kind-pool

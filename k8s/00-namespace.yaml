@@ -1,0 +1,15 @@
+# Namespace for the app. MetalLB pool stays in `metallb-system` (controller
+# watches that namespace only) — only app resources move here.
+#
+# Filename prefix `00-` wins alphabetical sort so `kubectl apply -f k8s/`
+# creates the namespace before any namespaced resource references it.
+# Drops when this repo adopts Kustomize/Helm (those handle ordering).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8s-go
+  labels:
+    app.kubernetes.io/name: k8s-go
+    app.kubernetes.io/version: "0.2"
+    app.kubernetes.io/part-of: k8s-go-demo
+    app.kubernetes.io/managed-by: kubectl
