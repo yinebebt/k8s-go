@@ -1,28 +1,21 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: k8s-go-config
-  labels:
-    app: k8s-go
-data:
-  # App-level config tunable per env without rebuild.
-  LOG_LEVEL: "info"
-
----
-
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: k8s-go-deployment
+  namespace: k8s-go
   labels:
     app: k8s-go
+    app.kubernetes.io/name: k8s-go
+    app.kubernetes.io/version: "0.2"
+    app.kubernetes.io/part-of: k8s-go-demo
+    app.kubernetes.io/managed-by: kubectl
 spec:
-  replicas: 4 # no of pod copies
+  replicas: 4
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxUnavailable: 25%  # allow 25% pods unavailable during update
-      maxSurge: 25%        # allow temporary scaling up
+      maxUnavailable: 25%
+      maxSurge: 25%
   selector:
     matchLabels:
       app: k8s-go
@@ -30,6 +23,10 @@ spec:
     metadata:
       labels:
         app: k8s-go
+        app.kubernetes.io/name: k8s-go
+        app.kubernetes.io/version: "0.2"
+        app.kubernetes.io/part-of: k8s-go-demo
+        app.kubernetes.io/managed-by: kubectl
     spec:
       containers:
         - name: k8s-go
@@ -52,8 +49,8 @@ spec:
               containerPort: 8080
           resources:
             requests:
-              memory: "64Mi"   # 64*1024*1024 bytes
-              cpu: "100m"  # 100 millicore
+              memory: "64Mi"
+              cpu: "100m"
             limits:
               memory: "128Mi"
               cpu: "500m"
@@ -70,40 +67,3 @@ spec:
             initialDelaySeconds: 2
             periodSeconds: 1
             failureThreshold: 1
-
----
-
-apiVersion: v1
-kind: Service
-metadata:
-  name: k8s-go-service
-  labels:
-    app: k8s-go
-spec:
-  # LoadBalancer asks the cluster for an external IP.
-  type: LoadBalancer
-  selector:
-    app: k8s-go          # matched pod labels
-  ports:
-    - protocol: TCP
-      port: 80           # external port
-      targetPort: http   # named pod port
-
----
-
-apiVersion: v1
-kind: Service
-metadata:
-  name: k8s-go-nodeport
-  labels:
-    app: k8s-go
-spec:
-  # NodePort opens the same port on every node. Works without any LB controller.
-  type: NodePort
-  selector:
-    app: k8s-go
-  ports:
-    - protocol: TCP
-      port: 80
-      targetPort: http
-      nodePort: 30080
