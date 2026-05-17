@@ -2,13 +2,8 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: k8s-go-deployment
-  namespace: k8s-go
   labels:
     app: k8s-go
-    app.kubernetes.io/name: k8s-go
-    app.kubernetes.io/version: "0.2"
-    app.kubernetes.io/part-of: k8s-go-demo
-    app.kubernetes.io/managed-by: kubectl
 spec:
   replicas: 4
   strategy:
@@ -23,14 +18,12 @@ spec:
     metadata:
       labels:
         app: k8s-go
-        app.kubernetes.io/name: k8s-go
-        app.kubernetes.io/version: "0.2"
-        app.kubernetes.io/part-of: k8s-go-demo
-        app.kubernetes.io/managed-by: kubectl
     spec:
       containers:
         - name: k8s-go
-          image: yinebeb/k8s-go:0.2
+          # Tag pinned via kustomization.yaml `images.newTag`. Source kept
+          # untagged so there's a single source of truth for version.
+          image: yinebeb/k8s-go
           imagePullPolicy: IfNotPresent
           # bulk-inject all ConfigMap keys as env vars
           envFrom:
