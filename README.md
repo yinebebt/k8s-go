@@ -104,20 +104,26 @@ Both are fine for app development. They are bad for learning *why* `LoadBalancer
 
 ## Layout of `k8s/`
 
-Manifests live one-per-resource under `k8s/`:
+Manifests live one-per-resource under `k8s/`, orchestrated by a Kustomize root:
 
 ```
 k8s/
-├── 00-namespace.yaml      # `k8s-go` namespace — must exist before its members
+├── kustomization.yaml     # Kustomize root — namespace, labels, image tag pin
+├── namespace.yaml         # `k8s-go` namespace
 ├── configmap.yaml         # app config (LOG_LEVEL, …)
 ├── deployment.yaml        # 4 replicas, probes, resources, envFrom CM + env from Secret
 ├── service.yaml           # Two Services (LoadBalancer + NodePort) against the same pods
-├── metallb-pool.yaml      # IPAddressPool + L2Advertisement (kind subnet, metallb-system NS)
+├── metallb-pool.yaml      # IPAddressPool + L2Advertisement (kind subnet, metallb-system NS — outside kustomization)
 ├── secret.example.yaml    # template; copy → secret.yaml and fill in
-└── secret.yaml            # real values, gitignored
+└── secret.yaml            # real values, gitignored, applied separately
 ```
 
-App resources (configmap, deployment, service, secret) all set `metadata.namespace: k8s-go`. MetalLB pool stays in `metallb-system` (controller watches that namespace only — non-negotiable).
+`kustomization.yaml` injects `metadata.namespace: k8s-go` and the `app.kubernetes.io/*` labels onto every resource it lists, so the individual manifests stay minimal. Apply the app stack with `kubectl apply -k k8s/`. Two files sit **outside** the kustomization on purpose:
+
+- `metallb-pool.yaml` — lives in the `metallb-system` namespace (MetalLB controller hardcoded to watch that NS). Including it in a kustomization that sets `namespace: k8s-go` would rewrite its NS to the wrong place.
+- `secret.yaml` — gitignored. Including it in `resources:` would break `kubectl apply -k` on any fresh clone where the file doesn't exist yet.
+
+Both are applied with plain `-f` after the kustomization (see §Apply patterns).
 
 ### Why a dedicated namespace?
 
@@ -151,21 +157,26 @@ kubectl config view --minify -o jsonpath='{..namespace}'   # confirm
 
 ### Apply order
 
-`kubectl apply -f k8s/` processes files **alphabetically**. The `00-` prefix on `00-namespace.yaml` is deliberate: it wins the sort so the namespace exists before any namespaced resource references it. Without it, the first apply on a fresh cluster errors with `namespaces "k8s-go" not found`.
+Kustomize emits resources in GVK (Group/Version/Kind) order — Namespace → CRD → RBAC → ConfigMap → Secret → Service → Deployment. The Namespace always lands first, so namespaced resources never race against its creation. No filename prefix hack needed.
 
-Industry alternatives (for context):
-- **Kustomize / Helm** — emit resources in a GVK (Group/Version/Kind) sorted order (Namespace → CRD → RBAC → ConfigMap → Secret → Service → Deployment). No filename hack needed.
+Other approaches you might see in other repos:
+- **Plain `kubectl apply -f dir/`** — alphabetical filename sort. Common convention: numeric prefix `00-`, `10-`, `20-` to force order. That's what this repo used pre-Kustomize.
+- **Helm** — same GVK sort as Kustomize + lifecycle hooks (`pre-install`, `post-install`) for explicit phases.
 - **Argo CD / Flux** — sync waves (`argocd.argoproj.io/sync-wave: "-1"` on the namespace, `"0"` on workloads).
 - **Server-side apply + retry** — apply everything, retry on transient errors until convergence.
-
-When this repo adopts Kustomize (see TODO), the `00-` prefix becomes redundant and can drop.
 
 ### Apply patterns
 
 ```bash
-kubectl apply -f k8s/                 # everything (alphabetical; 00-namespace wins first)
-kubectl apply -f k8s/deployment.yaml  # just the Deployment after an image bump
+kubectl apply -k k8s/                       # app stack via Kustomize (namespace + configmap + deployment + services)
+kubectl apply -f k8s/secret.yaml            # real Secret (gitignored, outside Kustomize)
+kubectl apply -f k8s/metallb-pool.yaml      # IPAddressPool + L2Advertisement in metallb-system
+
+kubectl kustomize k8s/                      # render to stdout without applying — useful for diff/review
+kubectl diff -k k8s/                        # what the next apply would change
 ```
+
+Bumping the image tag touches two coupled fields in `kustomization.yaml`: `images[0].newTag` (what runs) and the `app.kubernetes.io/version` label pair (what reports its identity). Both sit in the same file, so the bump is a single localized diff — no per-manifest grep, and `deployment.yaml` keeps its image untagged to avoid a third source of truth.
 
 MetalLB itself is installed once per cluster from upstream (see §Install MetalLB). `metallb-pool.yaml` is *configuration* for that install — the CRDs it uses (`IPAddressPool`, `L2Advertisement`) only resolve after the install manifest has been applied.
 
@@ -177,10 +188,13 @@ Prerequisite: a cluster reachable via `kubectl cluster-info`.
 # 1. Create the Secret, replace API_TOKEN value
 cp k8s/secret.example.yaml k8s/secret.yaml
 
-# 2. Apply everything (00-namespace first via alphabetical sort, then the rest)
-kubectl apply -f k8s/
+# 2. Apply the app stack via Kustomize (namespace, configmap, deployment, services)
+kubectl apply -k k8s/
 
-# 3. Block until all replicas are Ready
+# 3. Apply the Secret (kept outside Kustomize because it's gitignored)
+kubectl apply -f k8s/secret.yaml
+
+# 4. Block until all replicas are Ready
 kubectl rollout status -n k8s-go deployment/k8s-go-deployment
 ```
 
@@ -190,7 +204,7 @@ Optional — pin your shell to the `k8s-go` namespace so you can drop `-n k8s-go
 kubectl config set-context --current --namespace=k8s-go
 ```
 
-If MetalLB isn't installed yet, `metallb-pool.yaml` errors with `no matches for kind "IPAddressPool"`. Either install MetalLB first (see §Install MetalLB), or skip the pool for now: `kubectl apply -f k8s/00-namespace.yaml -f k8s/configmap.yaml -f k8s/deployment.yaml -f k8s/service.yaml -f k8s/secret.yaml`. The `LoadBalancer` Service will sit at `<pending>` until MetalLB is in place — that's the path the next section walks through.
+If MetalLB isn't installed yet, skip the pool — Kustomize already excludes it. The `LoadBalancer` Service will sit at `<pending>` until MetalLB is in place — that's the path the next section walks through.
 
 ### Secrets: template-in-git vs real value out-of-git
 
@@ -199,7 +213,7 @@ This repo uses the **`.example.yaml` template + gitignored real file** pattern (
 - `k8s/secret.example.yaml` — committed, holds the schema and a placeholder (`API_TOKEN: "replace-me"`).
 - `k8s/secret.yaml` — gitignored (`.gitignore` line: `k8s/secret.yaml`), holds the real value, applied locally only.
 
-Pros: zero extra tooling, obvious to a reader. Cons: real secret lives in plaintext on every dev's disk, not reconcilable from git (every cluster needs out-of-band provisioning), and `kubectl apply -f k8s/` applies *both* files sequentially — the alphabetical order saves us today (real wins because `secret.yaml` sorts after `secret.example.yaml`), but rename either file and you flip back to placeholder. Fragile.
+Pros: zero extra tooling, obvious to a reader. Cons: real secret lives in plaintext on every dev's disk, and not reconcilable from git (every cluster needs out-of-band provisioning). The earlier apply-collision foot-gun (both Secret files getting applied by `kubectl apply -f k8s/`) is now gone — only `secret.yaml` is applied explicitly, and `secret.example.yaml` lives outside the Kustomize root as a pure schema reference.
 
 Industry-standard alternatives for shipping secrets *with* GitOps:
 
@@ -216,7 +230,7 @@ Rule of thumb:
 - **Single team, single cloud** — Sealed Secrets (simplest) or SOPS (works offline, no controller needed at decrypt-time on Flux).
 - **Multi-team / regulated / rotating secrets** — ESO or Vault. Secret lives in a real KMS; pods get the latest on every restart.
 
-When this repo grows past the demo stage, picking one of the above closes the foot-gun in §Apply patterns (the two-Secret-file apply collision). Until then, the `secret.example.yaml` template stays useful as a schema reference even after migration.
+When this repo grows past the demo stage, any of the above is a step up. A natural next move with Kustomize already in place is `secretGenerator` from a gitignored `secret.env` file — that kills the disk-plaintext step entirely while staying within stock Kustomize. The `secret.example.yaml` template stays useful as a schema reference even after migration.
 
 ## Accessing the Service
 
@@ -433,7 +447,7 @@ The repo sticks with MetalLB + the sidecar-container test because the goal is to
 | `webhook "ipaddresspoolvalidationwebhook.metallb.io" ... connection refused` on first apply | Webhook pod not Ready yet. Retry in ~10 s. |
 | `MountVolume.SetUp failed for volume "memberlist"` on speaker | Controller hasn't created the `memberlist` secret yet. Self-heals once controller is up. |
 | `curl <VIP>` from macOS/Windows shell hangs | Docker Desktop VM hides the `kind` bridge from the host. See §Why curl from the host hangs on macOS/Windows. |
-| `kubectl apply -f k8s/` errors `no matches for kind "IPAddressPool"` | MetalLB install manifest hasn't been applied yet. Run §Step 3 first. |
+| `kubectl apply -f k8s/metallb-pool.yaml` errors `no matches for kind "IPAddressPool"` | MetalLB install manifest hasn't been applied yet. Run §Step 3 first. |
 | `kind load docker-image …` errors `no nodes found for cluster "kind"` | Default cluster name is `kind`, not `k8s-go`. Add `--name k8s-go`. |
 
 ### From zero on a clean kind cluster
@@ -463,8 +477,10 @@ docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}
 cp k8s/secret.example.yaml k8s/secret.yaml
 $EDITOR k8s/secret.yaml      # replace API_TOKEN value
 
-# 6. apply everything app-side (Namespace, ConfigMap, Deployment, both Services, MetalLB pool)
-kubectl apply -f k8s/
+# 6. apply app stack via Kustomize, then the two out-of-kustomization files
+kubectl apply -k k8s/                       # namespace, configmap, deployment, services
+kubectl apply -f k8s/secret.yaml            # gitignored, outside Kustomize
+kubectl apply -f k8s/metallb-pool.yaml      # lives in metallb-system, outside Kustomize
 kubectl rollout status -n k8s-go deployment/k8s-go-deployment
 
 # 7. watch <pending> flip to a real IP
@@ -476,7 +492,7 @@ TOKEN=$(kubectl get secret -n k8s-go k8s-go-secrets -o jsonpath='{.data.API_TOKE
 docker run --rm --network kind curlimages/curl -sS -H "Authorization: Bearer $TOKEN" http://$VIP/hello
 ```
 
-Order matters: step 3 (MetalLB install) must come before step 6, otherwise `kubectl apply -f k8s/` errors with `no matches for kind "IPAddressPool"`.
+Order matters: step 3 (MetalLB install) must come before step 6, otherwise `kubectl apply -f k8s/metallb-pool.yaml` errors with `no matches for kind "IPAddressPool"`.
 
 ### Next step
 
