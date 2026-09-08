@@ -2,15 +2,7 @@
 
 [![Docker Image](https://img.shields.io/docker/v/yinebeb/k8s-go?label=docker&logo=docker)](https://hub.docker.com/r/yinebeb/k8s-go)
 
-Go HTTP server packaged for Kubernetes. Handles `SIGTERM` with a readiness drain, exposes split `/livez` and `/readyz` probes, logs JSON via `slog`, and checks a Bearer token from a `Secret` on `/hello`.
-
-## Endpoints
-
-| Path | Auth | Purpose |
-|------|------|---------|
-| `/hello` | `Authorization: Bearer $API_TOKEN` | Demo handler |
-| `/livez` | none | Liveness probe |
-| `/readyz` | none | Readiness probe (flips during startup + shutdown drain) |
+Go HTTP server packaged for learning Kubernetes. Handler exposes `/livez` and `/readyz` probes, and checks a Bearer token from a `Secret` on `/hello`.
 
 ## Environment
 
@@ -28,7 +20,6 @@ API_TOKEN=devtoken LOG_LEVEL=DEBUG ./main
 ```
 
 ```bash
-curl -H "Authorization: Bearer devtoken" http://localhost:8080/hello
 curl http://localhost:8080/livez
 curl http://localhost:8080/readyz
 ```
@@ -178,7 +169,7 @@ kubectl diff -k k8s/                        # what the next apply would change
 
 Bumping the image tag touches two coupled fields in `kustomization.yaml`: `images[0].newTag` (what runs) and the `app.kubernetes.io/version` label pair (what reports its identity). Both sit in the same file, so the bump is a single localized diff — no per-manifest grep, and `deployment.yaml` keeps its image untagged to avoid a third source of truth.
 
-MetalLB itself is installed once per cluster from upstream (see §Install MetalLB). `metallb-pool.yaml` is *configuration* for that install — the CRDs it uses (`IPAddressPool`, `L2Advertisement`) only resolve after the install manifest has been applied.
+MetalLB itself is installed once per cluster from upstream. `metallb-pool.yaml` is *configuration* for that install — the CRDs it uses (`IPAddressPool`, `L2Advertisement`) only resolve after the install manifest has been applied.
 
 ## Deploy
 
