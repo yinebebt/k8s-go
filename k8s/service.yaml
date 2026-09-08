@@ -33,7 +33,7 @@ metadata:
     app: k8s-go
     app.kubernetes.io/name: k8s-go
     app.kubernetes.io/version: "0.2"
-    app.kubernetes.io/part-of: k8s-go-demo
+    app.kubernetes.io/part-of: k8s-go
     app.kubernetes.io/managed-by: kubectl
 spec:
   # NodePort opens the same port on every node. Works without any LB controller.

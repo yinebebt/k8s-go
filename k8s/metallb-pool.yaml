@@ -5,7 +5,7 @@
 # only crosses one broadcast domain — for kind that is the `kind` Docker
 # bridge. An IP outside the bridge subnet is unreachable.
 # Other cluster managers (k3d, Minikube, bare metal) put nodes on different
-# networks; pool range must follow. See README §Step 1.
+# networks; pool range must follow.
 #
 # Verify the subnet before applying:
 #   docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}'

@@ -2,15 +2,7 @@
 
 [![Docker Image](https://img.shields.io/docker/v/yinebeb/k8s-go?label=docker&logo=docker)](https://hub.docker.com/r/yinebeb/k8s-go)
 
-Go HTTP server packaged for Kubernetes. Handles `SIGTERM` with a readiness drain, exposes split `/livez` and `/readyz` probes, logs JSON via `slog`, and checks a Bearer token from a `Secret` on `/hello`.
-
-## Endpoints
-
-| Path | Auth | Purpose |
-|------|------|---------|
-| `/hello` | `Authorization: Bearer $API_TOKEN` | Demo handler |
-| `/livez` | none | Liveness probe |
-| `/readyz` | none | Readiness probe (flips during startup + shutdown drain) |
+Go HTTP server packaged for learning Kubernetes. Handler exposes `/livez` and `/readyz` probes, and checks a Bearer token from a `Secret` on `/hello`.
 
 ## Environment
 
@@ -28,7 +20,6 @@ API_TOKEN=devtoken LOG_LEVEL=DEBUG ./main
 ```
 
 ```bash
-curl -H "Authorization: Bearer devtoken" http://localhost:8080/hello
 curl http://localhost:8080/livez
 curl http://localhost:8080/readyz
 ```
@@ -102,23 +93,6 @@ Both work, but both hide the part we want to see:
 
 Both are fine for app development. They are bad for learning *why* `LoadBalancer` works, because they make `<pending>` never happen. `kind` ships no such controller, so the failure mode is visible and the fix is explicit.
 
-## Layout of `k8s/`
-
-Manifests live one-per-resource under `k8s/`:
-
-```
-k8s/
-├── 00-namespace.yaml      # `k8s-go` namespace — must exist before its members
-├── configmap.yaml         # app config (LOG_LEVEL, …)
-├── deployment.yaml        # 4 replicas, probes, resources, envFrom CM + env from Secret
-├── service.yaml           # Two Services (LoadBalancer + NodePort) against the same pods
-├── metallb-pool.yaml      # IPAddressPool + L2Advertisement (kind subnet, metallb-system NS)
-├── secret.example.yaml    # template; copy → secret.yaml and fill in
-└── secret.yaml            # real values, gitignored
-```
-
-App resources (configmap, deployment, service, secret) all set `metadata.namespace: k8s-go`. MetalLB pool stays in `metallb-system` (controller watches that namespace only — non-negotiable).
-
 ### Why a dedicated namespace?
 
 A namespace is a logical partition of API objects. Same kind+name can coexist in different namespaces. Buys you:
@@ -167,7 +141,7 @@ kubectl apply -f k8s/                 # everything (alphabetical; 00-namespace w
 kubectl apply -f k8s/deployment.yaml  # just the Deployment after an image bump
 ```
 
-MetalLB itself is installed once per cluster from upstream (see §Install MetalLB). `metallb-pool.yaml` is *configuration* for that install — the CRDs it uses (`IPAddressPool`, `L2Advertisement`) only resolve after the install manifest has been applied.
+MetalLB itself is installed once per cluster from upstream. `metallb-pool.yaml` is *configuration* for that install — the CRDs it uses (`IPAddressPool`, `L2Advertisement`) only resolve after the install manifest has been applied.
 
 ## Deploy
 
@@ -215,8 +189,6 @@ Rule of thumb:
 - **Solo dev / learning repo** (this one) — template + gitignored real, or imperative create. Fine until you need a second cluster.
 - **Single team, single cloud** — Sealed Secrets (simplest) or SOPS (works offline, no controller needed at decrypt-time on Flux).
 - **Multi-team / regulated / rotating secrets** — ESO or Vault. Secret lives in a real KMS; pods get the latest on every restart.
-
-When this repo grows past the demo stage, picking one of the above closes the foot-gun in §Apply patterns (the two-Secret-file apply collision). Until then, the `secret.example.yaml` template stays useful as a schema reference even after migration.
 
 ## Accessing the Service
 
@@ -424,18 +396,6 @@ If you need the VIP reachable from the host shell on macOS/Windows, pick one:
 
 The repo sticks with MetalLB + the sidecar-container test because the goal is to see a real LB controller in action, not to make `localhost` work.
 
-### Troubleshooting
-
-| Symptom | Cause |
-|---|---|
-| `EXTERNAL-IP` stays `<pending>` after pool apply | No `L2Advertisement` referencing the pool, or pool exhausted. `kubectl describe svc -n k8s-go k8s-go-service` shows the allocator's reason. |
-| VIP assigned, `curl` from kind-net container times out | speaker pod not Running, or pool range outside the actual kind subnet. Check `docker network inspect kind` again. |
-| `webhook "ipaddresspoolvalidationwebhook.metallb.io" ... connection refused` on first apply | Webhook pod not Ready yet. Retry in ~10 s. |
-| `MountVolume.SetUp failed for volume "memberlist"` on speaker | Controller hasn't created the `memberlist` secret yet. Self-heals once controller is up. |
-| `curl <VIP>` from macOS/Windows shell hangs | Docker Desktop VM hides the `kind` bridge from the host. See §Why curl from the host hangs on macOS/Windows. |
-| `kubectl apply -f k8s/` errors `no matches for kind "IPAddressPool"` | MetalLB install manifest hasn't been applied yet. Run §Step 3 first. |
-| `kind load docker-image …` errors `no nodes found for cluster "kind"` | Default cluster name is `kind`, not `k8s-go`. Add `--name k8s-go`. |
-
 ### From zero on a clean kind cluster
 
 Full path, copy-paste:
@@ -475,8 +435,6 @@ VIP=$(kubectl get svc -n k8s-go k8s-go-service -o jsonpath='{.status.loadBalance
 TOKEN=$(kubectl get secret -n k8s-go k8s-go-secrets -o jsonpath='{.data.API_TOKEN}' | base64 -d)
 docker run --rm --network kind curlimages/curl -sS -H "Authorization: Bearer $TOKEN" http://$VIP/hello
 ```
-
-Order matters: step 3 (MetalLB install) must come before step 6, otherwise `kubectl apply -f k8s/` errors with `no matches for kind "IPAddressPool"`.
 
 ### Next step
 
