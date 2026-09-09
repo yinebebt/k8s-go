@@ -1,6 +1,6 @@
 # k8s-go
 
-[![Docker Image](https://img.shields.io/docker/v/yinebeb/k8s-go?label=docker&logo=docker)](https://hub.docker.com/r/yinebeb/k8s-go)
+[![GHCR Image](https://img.shields.io/badge/ghcr.io-k8s--go-blue?logo=github)](https://github.com/yinebebt/k8s-go/pkgs/container/k8s-go)
 
 Go HTTP server packaged for learning Kubernetes. Handler exposes `/livez` and `/readyz` probes, and checks a Bearer token from a `Secret` on `/hello`.
 
@@ -24,12 +24,29 @@ curl http://localhost:8080/livez
 curl http://localhost:8080/readyz
 ```
 
+Common local workflows are also available through the `Makefile`:
+
+```bash
+make check
+make build
+make docker-build TAG=0.2
+make load TAG=0.2 CLUSTER=k8s-go
+make deploy
+make logs
+```
+
 ## Build Docker image
 
 ```bash
-docker build -t yinebeb/k8s-go:0.2 .
-docker push yinebeb/k8s-go:0.2   # only if your cluster pulls from a registry
+docker build -t ghcr.io/yinebebt/k8s-go:0.2 .
+docker push ghcr.io/yinebebt/k8s-go:0.2   # after authenticating to ghcr.io
 ```
+
+GitHub Actions publishes tagged images to GitHub Container Registry (GHCR)
+using the automatic `GITHUB_TOKEN`, so no additional registry credentials are
+needed in the repository. For a private GHCR package, configure an image pull
+secret in the target cluster. A local `kind` cluster can avoid registry access
+with `make load`.
 
 ## What is a Kubernetes cluster?
 
@@ -75,7 +92,7 @@ docker exec -it k8s-go-control-plane ls /etc/kubernetes/manifests # static pod m
 Load the locally built image into the cluster (no registry push needed). **`kind load` defaults to a cluster named `kind`** — if your cluster has any other name you must pass `--name` or you get `ERROR: no nodes found for cluster "kind"`:
 
 ```bash
-kind load docker-image yinebeb/k8s-go:0.2 --name k8s-go
+kind load docker-image ghcr.io/yinebebt/k8s-go:0.2 --name k8s-go
 ```
 
 When done:
@@ -92,6 +109,30 @@ Both work, but both hide the part we want to see:
 - **Docker Desktop**'s built-in Kubernetes registers a load-balancer controller that assigns `localhost` as the `EXTERNAL-IP` of every `LoadBalancer` Service. That is host-side glue, not part of the cluster.
 
 Both are fine for app development. They are bad for learning *why* `LoadBalancer` works, because they make `<pending>` never happen. `kind` ships no such controller, so the failure mode is visible and the fix is explicit.
+
+## Layout of `k8s/`
+
+Manifests live one-per-resource under `k8s/`, orchestrated by a Kustomize root:
+
+```
+k8s/
+├── kustomization.yaml     # Kustomize root — namespace, labels, image tag pin
+├── namespace.yaml         # `k8s-go` namespace
+├── configmap.yaml         # app config (LOG_LEVEL, …)
+├── deployment.yaml        # 4 replicas, probes, resources, envFrom CM + env from Secret
+├── service.yaml           # Two Services (LoadBalancer + NodePort) against the same pods
+├── pdb.yaml               # keeps two pods available during voluntary disruptions
+├── metallb-pool.yaml      # IPAddressPool + L2Advertisement (kind subnet, metallb-system NS — outside kustomization)
+├── secret.example.yaml    # template; copy → secret.yaml and fill in
+└── secret.yaml            # real values, gitignored, applied separately
+```
+
+`kustomization.yaml` injects the namespace and standard labels onto every resource it lists, so the individual manifests stay minimal. Two files sit **outside** the kustomization on purpose:
+
+- `metallb-pool.yaml` — lives in the `metallb-system` namespace (MetalLB controller hardcoded to watch that NS). Including it in a kustomization that sets `namespace: k8s-go` would rewrite its NS to the wrong place.
+- `secret.yaml` — gitignored. Including it in `resources:` would break `kubectl apply -k` on any fresh clone where the file doesn't exist yet.
+
+The `deploy` Make target applies these resources in the required order.
 
 ### Why a dedicated namespace?
 
@@ -125,46 +166,42 @@ kubectl config view --minify -o jsonpath='{..namespace}'   # confirm
 
 ### Apply order
 
-`kubectl apply -f k8s/` processes files **alphabetically**. The `00-` prefix on `00-namespace.yaml` is deliberate: it wins the sort so the namespace exists before any namespaced resource references it. Without it, the first apply on a fresh cluster errors with `namespaces "k8s-go" not found`.
+Kustomize emits resources in GVK (Group/Version/Kind) order — Namespace → CRD → RBAC → ConfigMap → Secret → Service → Deployment. The Namespace always lands first, so namespaced resources never race against its creation. No filename prefix hack needed.
 
-Industry alternatives (for context):
-- **Kustomize / Helm** — emit resources in a GVK (Group/Version/Kind) sorted order (Namespace → CRD → RBAC → ConfigMap → Secret → Service → Deployment). No filename hack needed.
+Other approaches you might see in other repos:
+- **Plain `kubectl apply -f dir/`** — alphabetical filename sort. Common convention: numeric prefix `00-`, `10-`, `20-` to force order. That's what this repo used pre-Kustomize.
+- **Helm** — same GVK sort as Kustomize + lifecycle hooks (`pre-install`, `post-install`) for explicit phases.
 - **Argo CD / Flux** — sync waves (`argocd.argoproj.io/sync-wave: "-1"` on the namespace, `"0"` on workloads).
 - **Server-side apply + retry** — apply everything, retry on transient errors until convergence.
 
-When this repo adopts Kustomize (see TODO), the `00-` prefix becomes redundant and can drop.
+### Applying changes
 
-### Apply patterns
+Use `make deploy` for the complete ordered deployment. Use
+`kubectl kustomize k8s/` or `kubectl diff -k k8s/` when reviewing manifests.
 
-```bash
-kubectl apply -f k8s/                 # everything (alphabetical; 00-namespace wins first)
-kubectl apply -f k8s/deployment.yaml  # just the Deployment after an image bump
-```
+Bumping the image tag requires updating `images.newTag` and the
+`app.kubernetes.io/version` label in `kustomization.yaml`.
 
 MetalLB itself is installed once per cluster from upstream. `metallb-pool.yaml` is *configuration* for that install — the CRDs it uses (`IPAddressPool`, `L2Advertisement`) only resolve after the install manifest has been applied.
 
 ## Deploy
 
-Prerequisite: a cluster reachable via `kubectl cluster-info`.
+Create the local Secret from its template, replace the token, then run
+`make deploy`. The target installs MetalLB, applies the manifests in order, and
+waits for the rollout.
 
 ```bash
-# 1. Create the Secret, replace API_TOKEN value
 cp k8s/secret.example.yaml k8s/secret.yaml
-
-# 2. Apply everything (00-namespace first via alphabetical sort, then the rest)
-kubectl apply -f k8s/
-
-# 3. Block until all replicas are Ready
-kubectl rollout status -n k8s-go deployment/k8s-go-deployment
 ```
 
-Optional — pin your shell to the `k8s-go` namespace so you can drop `-n k8s-go` from every command:
+Edit `k8s/secret.yaml`, then run:
 
 ```bash
-kubectl config set-context --current --namespace=k8s-go
+make deploy
 ```
 
-If MetalLB isn't installed yet, `metallb-pool.yaml` errors with `no matches for kind "IPAddressPool"`. Either install MetalLB first (see §Install MetalLB), or skip the pool for now: `kubectl apply -f k8s/00-namespace.yaml -f k8s/configmap.yaml -f k8s/deployment.yaml -f k8s/service.yaml -f k8s/secret.yaml`. The `LoadBalancer` Service will sit at `<pending>` until MetalLB is in place — that's the path the next section walks through.
+The `LoadBalancer` Service remains `<pending>` until MetalLB is installed and
+configured.
 
 ### Secrets: template-in-git vs real value out-of-git
 
@@ -173,7 +210,7 @@ This repo uses the **`.example.yaml` template + gitignored real file** pattern (
 - `k8s/secret.example.yaml` — committed, holds the schema and a placeholder (`API_TOKEN: "replace-me"`).
 - `k8s/secret.yaml` — gitignored (`.gitignore` line: `k8s/secret.yaml`), holds the real value, applied locally only.
 
-Pros: zero extra tooling, obvious to a reader. Cons: real secret lives in plaintext on every dev's disk, not reconcilable from git (every cluster needs out-of-band provisioning), and `kubectl apply -f k8s/` applies *both* files sequentially — the alphabetical order saves us today (real wins because `secret.yaml` sorts after `secret.example.yaml`), but rename either file and you flip back to placeholder. Fragile.
+Pros: zero extra tooling, obvious to a reader. Cons: real secret lives in plaintext on every dev's disk, and not reconcilable from git (every cluster needs out-of-band provisioning). The earlier apply-collision foot-gun (both Secret files getting applied by `kubectl apply -f k8s/`) is now gone — only `secret.yaml` is applied explicitly, and `secret.example.yaml` lives outside the Kustomize root as a pure schema reference.
 
 Industry-standard alternatives for shipping secrets *with* GitOps:
 
@@ -189,6 +226,8 @@ Rule of thumb:
 - **Solo dev / learning repo** (this one) — template + gitignored real, or imperative create. Fine until you need a second cluster.
 - **Single team, single cloud** — Sealed Secrets (simplest) or SOPS (works offline, no controller needed at decrypt-time on Flux).
 - **Multi-team / regulated / rotating secrets** — ESO or Vault. Secret lives in a real KMS; pods get the latest on every restart.
+
+When this repo grows past the demo stage, any of the above is a step up. A natural next move with Kustomize already in place is `secretGenerator` from a gitignored `secret.env` file — that kills the disk-plaintext step entirely while staying within stock Kustomize. The `secret.example.yaml` template stays useful as a schema reference even after migration.
 
 ## Accessing the Service
 
@@ -396,9 +435,21 @@ If you need the VIP reachable from the host shell on macOS/Windows, pick one:
 
 The repo sticks with MetalLB + the sidecar-container test because the goal is to see a real LB controller in action, not to make `localhost` work.
 
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| `EXTERNAL-IP` stays `<pending>` after pool apply | No `L2Advertisement` referencing the pool, or pool exhausted. `kubectl describe svc -n k8s-go k8s-go-service` shows the allocator's reason. |
+| VIP assigned, `curl` from kind-net container times out | speaker pod not Running, or pool range outside the actual kind subnet. Check `docker network inspect kind` again. |
+| `webhook "ipaddresspoolvalidationwebhook.metallb.io" ... connection refused` on first apply | Webhook pod not Ready yet. Retry in ~10 s. |
+| `MountVolume.SetUp failed for volume "memberlist"` on speaker | Controller hasn't created the `memberlist` secret yet. Self-heals once controller is up. |
+| `curl <VIP>` from macOS/Windows shell hangs | Docker Desktop VM hides the `kind` bridge from the host. See §Why curl from the host hangs on macOS/Windows. |
+| `kubectl apply -f k8s/metallb-pool.yaml` errors `no matches for kind "IPAddressPool"` | MetalLB install manifest hasn't been applied yet. Run §Step 3 first. |
+| `kind load docker-image …` errors `no nodes found for cluster "kind"` | Default cluster name is `kind`, not `k8s-go`. Add `--name k8s-go`. |
+
 ### From zero on a clean kind cluster
 
-Full path, copy-paste:
+Use the Makefile for image loading and deployment:
 
 ```bash
 # 0. (optional) wipe any prior cluster
@@ -409,11 +460,8 @@ kind create cluster --name k8s-go
 kubectl cluster-info --context kind-k8s-go
 
 # 2. load the app image so kind doesn't try to pull from a registry
-kind load docker-image yinebeb/k8s-go:0.2 --name k8s-go
-
-# 3. install MetalLB (CRDs + controller + speaker)
-kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.15.3/config/manifests/metallb-native.yaml
-kubectl -n metallb-system wait --for=condition=Ready pod --all --timeout=180s
+make load TAG=0.2 CLUSTER=k8s-go
+make deploy
 
 # 4. confirm the kind docker subnet matches the pool in k8s/metallb-pool.yaml
 docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}'
@@ -423,18 +471,17 @@ docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}
 cp k8s/secret.example.yaml k8s/secret.yaml
 $EDITOR k8s/secret.yaml      # replace API_TOKEN value
 
-# 6. apply everything app-side (Namespace, ConfigMap, Deployment, both Services, MetalLB pool)
-kubectl apply -f k8s/
-kubectl rollout status -n k8s-go deployment/k8s-go-deployment
+# 6. apply app stack via Kustomize, then the two out-of-kustomization files
+make deploy
 
-# 7. watch <pending> flip to a real IP
+# Watch the assigned LoadBalancer address.
 kubectl get svc -n k8s-go k8s-go-service -w
 
-# 8. hit the VIP from a container on the kind docker network
 VIP=$(kubectl get svc -n k8s-go k8s-go-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 TOKEN=$(kubectl get secret -n k8s-go k8s-go-secrets -o jsonpath='{.data.API_TOKEN}' | base64 -d)
 docker run --rm --network kind curlimages/curl -sS -H "Authorization: Bearer $TOKEN" http://$VIP/hello
 ```
+
 
 ### Next step
 

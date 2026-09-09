@@ -2,13 +2,8 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: k8s-go-deployment
-  namespace: k8s-go
   labels:
     app: k8s-go
-    app.kubernetes.io/name: k8s-go
-    app.kubernetes.io/version: "0.2"
-    app.kubernetes.io/part-of: k8s-go
-    app.kubernetes.io/managed-by: kubectl
 spec:
   replicas: 4
   strategy:
@@ -23,20 +18,26 @@ spec:
     metadata:
       labels:
         app: k8s-go
-        app.kubernetes.io/name: k8s-go
-        app.kubernetes.io/version: "0.2"
-        app.kubernetes.io/part-of: k8s-go
-        app.kubernetes.io/managed-by: kubectl
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: k8s-go
-          image: yinebeb/k8s-go:0.2
+          image: ghcr.io/yinebebt/k8s-go
           imagePullPolicy: IfNotPresent
-          # bulk-inject all ConfigMap keys as env vars
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           envFrom:
             - configMapRef:
                 name: k8s-go-config
-          # single-key Secret mount (least-privilege).
           env:
             - name: API_TOKEN
               valueFrom:
@@ -44,7 +45,6 @@ spec:
                   name: k8s-go-secrets
                   key: API_TOKEN
           ports:
-            # App binds to its default port (8080) — see main.go.
             - name: http
               containerPort: 8080
           resources:
