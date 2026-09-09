@@ -1,18 +1,8 @@
-# Kustomize root for the k8s-go app stack. Apply with: kubectl apply -k k8s/
-# See README §Layout of `k8s/` for what's in vs out, and why.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 namespace: k8s-go
 
-# `includeSelectors: false` is critical — without it Kustomize also writes
-# these labels into Deployment.spec.selector.matchLabels, which is immutable
-# after the Deployment is created. The existing `app: k8s-go` selector key
-# stays the load-bearing one.
-#
-# `includeTemplates: true` propagates the labels into PodTemplate metadata
-# so pods carry them too (useful for `kubectl get pods -l app.kubernetes.io/...`
-# and for log/metric aggregators that group by these labels).
 labels:
   - pairs:
       app.kubernetes.io/name: k8s-go
@@ -22,10 +12,8 @@ labels:
     includeSelectors: false
     includeTemplates: true
 
-# Bump tag here once → image and `app.kubernetes.io/version` label move
-# together (update the `version` pair above to match).
 images:
-  - name: yinebeb/k8s-go
+  - name: ghcr.io/yinebebt/k8s-go
     newTag: "0.2"
 
 resources:
@@ -33,3 +21,4 @@ resources:
   - configmap.yaml
   - deployment.yaml
   - service.yaml
+  - pdb.yaml
