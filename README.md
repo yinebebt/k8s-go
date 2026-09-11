@@ -76,11 +76,18 @@ We use [`kind`](https://kind.sigs.k8s.io/) (Kubernetes-in-Docker). Each node is 
 Create:
 
 ```bash
-kind create cluster --name k8s-go
+kind create cluster --name k8s-go --config kind-config.yaml
 kubectl cluster-info --context kind-k8s-go
 docker ps                       # node is the container k8s-go-control-plane; only the api-server port is published
 docker network inspect kind     # kind always uses a docker network called "kind", regardless of cluster name
 ```
+
+The repository's `kind-config.yaml` also maps host ports `8080` and `8443` to
+the node's ports `80` and `443`, which are used by the kind ingress-nginx
+manifest. This makes the Ingress reachable from the host at
+`http://localhost:8080` and `https://localhost:8443`. Port mappings are fixed
+when the kind node is created; changing the file requires recreating the
+cluster.
 
 Inspect what `kubeadm` set up inside the node:
 
@@ -120,7 +127,8 @@ k8s/
 ├── namespace.yaml         # `k8s-go` namespace
 ├── configmap.yaml         # app config (LOG_LEVEL, …)
 ├── deployment.yaml        # 4 replicas, probes, resources, envFrom CM + env from Secret
-├── service.yaml           # Two Services (LoadBalancer + NodePort) against the same pods
+├── service.yaml           # Internal ClusterIP Service for the application
+├── ingress.yaml           # HTTP routing from ingress-nginx to the application Service
 ├── pdb.yaml               # keeps two pods available during voluntary disruptions
 ├── metallb-pool.yaml      # IPAddressPool + L2Advertisement (kind subnet, metallb-system NS — outside kustomization)
 ├── secret.example.yaml    # template; copy → secret.yaml and fill in
@@ -200,8 +208,29 @@ Edit `k8s/secret.yaml`, then run:
 make deploy
 ```
 
-The `LoadBalancer` Service remains `<pending>` until MetalLB is installed and
-configured.
+For a cluster created with this repository's `kind-config.yaml`, test the
+Ingress from the host:
+
+```bash
+curl --fail http://localhost:8080/livez
+
+TOKEN=$(kubectl get secret -n k8s-go k8s-go-secrets \
+  -o jsonpath='{.data.API_TOKEN}' | base64 -d)
+curl --fail -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/hello
+```
+
+If the cluster already existed before `kind-config.yaml` was added, recreate
+it once so Docker publishes the ports:
+
+```bash
+kind delete cluster --name k8s-go
+make recreate
+make deploy
+```
+
+The Ingress controller's `LoadBalancer` Service remains `<pending>` until
+MetalLB is installed and configured.
 
 ### Secrets: template-in-git vs real value out-of-git
 
@@ -231,41 +260,67 @@ When this repo grows past the demo stage, any of the above is a step up. A natur
 
 ## Accessing the Service
 
-`k8s/` ships **two** Service objects against the same pods so you can compare:
+`k8s/` ships one application Service:
 
 ```bash
 kubectl get svc -n k8s-go -l app=k8s-go
-# NAME              TYPE           CLUSTER-IP     EXTERNAL-IP   PORT(S)
-# k8s-go-service    LoadBalancer   10.96.x.x      <pending>     80:3xxxx/TCP
-# k8s-go-nodeport   NodePort       10.96.y.y      <none>        80:30080/TCP
+# NAME             TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)
+# k8s-go-service   ClusterIP   10.96.x.x    <none>        80/TCP
 ```
 
-### The LoadBalancer reality
+### Service fundamentals
 
-`EXTERNAL-IP` on `k8s-go-service` stays `<pending>` forever. This is **correct, not broken**. Vanilla Kubernetes has no load-balancer implementation. In a cloud cluster, the cloud-controller-manager watches `LoadBalancer` Services and provisions a real LB (AWS NLB, GCP forwarding rule, etc.). On bare metal or `kind`, nothing watches. No controller, no IP.
+Pods have IP addresses, but Pods are ephemeral: a Deployment can replace them
+and their addresses can change. A Service gives a changing set of selected
+Pods a stable virtual IP and DNS name. The selector chooses the backing Pods;
+the Service does not select a particular container.
 
-### NodePort works today — but only inside the kind network
+`port` is the port exposed by the Service, while `targetPort` is the port on
+the selected Pod. This repository uses the named container port `http` as its
+`targetPort`, which resolves to port 8080 in the Deployment. A Pod may contain
+multiple containers, but those containers share the Pod's network namespace and
+IP address.
 
-`k8s-go-nodeport` opens port `30080` on every node. NodePort is a port on the node's host network: anything that can route to the node can reach it. The kind node is a Docker container on the `kind` docker network, so:
+`ClusterIP` is the default Service type and is reachable inside the cluster.
+This project deliberately uses it for the application. The external entry
+point is the Ingress controller, not a separate public Service for every app.
+`NodePort` opens a port on every node and is useful for learning or as a
+backend for another load balancer. `LoadBalancer` asks an external
+implementation, such as a cloud controller or MetalLB, for an external IP;
+Kubernetes still routes the traffic from that Service to ready selected Pods.
+
+A headless Service sets `clusterIP: None`. It has no virtual IP; DNS returns
+the selected Pod addresses so a client or client-side library can choose a
+Pod. DNS is still commonly used, so "headless" does not mean "without DNS."
+
+### The LoadBalancer and Ingress path
+
+The application Service is intentionally `ClusterIP`; it is not directly
+public. The Ingress controller is the public entry point:
+
+```text
+client -> MetalLB VIP -> ingress-nginx LoadBalancer Service
+       -> Ingress rule -> k8s-go-service ClusterIP -> ready Pod
+```
+
+Vanilla Kubernetes has no load-balancer implementation. In a cloud cluster,
+the cloud-controller-manager provisions the external load balancer. On
+`kind`, MetalLB watches the `ingress-nginx-controller` `LoadBalancer` Service,
+assigns a VIP from the configured pool, and announces it on the Docker bridge.
+
+Install the controller and deploy the application with:
 
 ```bash
-# from inside the node container
-docker exec k8s-go-control-plane curl -sS http://localhost:30080/livez
-
-# from a throwaway container joined to the same docker network
-NODE_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' k8s-go-control-plane)
-docker run --rm --network kind curlimages/curl -sS http://$NODE_IP:30080/livez
+make deploy
 ```
 
-Both return `HTTP 200`.
+The controller manifest is pinned in the `Makefile`; the application Ingress
+is in `k8s/ingress.yaml`.
 
-`curl localhost:30080` from a macOS/Windows shell **fails** — Docker Desktop runs Docker inside a VM and does not route the host into the `kind` docker network, so the node IP `172.x.x.x` is not reachable. On Linux with Docker's bridge driver, the node IP *is* routable and host curl works.
-
-Three ways to reach the NodePort from a macOS/Windows host when you need to:
-
-- `kind create cluster --config <file>` with `extraPortMappings` — publishes node port `30080` to host port `30080` (literally `docker run -p`).
-- `kubectl port-forward -n k8s-go svc/k8s-go-nodeport 30080:80` — tunnels via the api-server to a backing pod. Skips the NodePort path itself.
-- Install MetalLB — assigns `k8s-go-service` a real IP from the kind subnet (same routability constraint as the node IP).
+This is why the repository still uses MetalLB after changing the application
+Service to `ClusterIP`: MetalLB provides the external IP for the
+`ingress-nginx-controller` `LoadBalancer` Service. It does not expose
+`k8s-go-service` directly.
 
 ### NodePort vs LoadBalancer — when each makes sense
 
@@ -279,21 +334,43 @@ Three ways to reach the NodePort from a macOS/Windows host when you need to:
 | **Typical use** | Dev/CI clusters, or behind an external LB / Ingress as a backend | Production public-facing services on cloud, or on bare metal after MetalLB |
 | **Anti-pattern** | Exposing a NodePort directly to the public internet (high port, no TLS, no LB health-check) | One `LoadBalancer` Service per microservice in production — use one Ingress + many `ClusterIP` instead |
 
-On a cloud production cluster the common pattern is **one `LoadBalancer` Service in front of an Ingress controller**, then many `ClusterIP` Services behind it. `NodePort` shows up either inside that chain (some Ingress installers use it) or in dev clusters like this one.
+On a cloud production cluster the common pattern is **one `LoadBalancer`
+Service in front of an Ingress controller**, then many `ClusterIP` Services
+behind it. NodePort may be used internally by some ingress installations, but
+it is not part of this application's public path.
 
-### Fallback: `kubectl port-forward`
+### Direct host access
 
-Works anywhere, bypasses Service routing entirely (the api-server tunnels to a backing pod). Useful for debugging, not for understanding Services:
+The normal walkthrough does not use port-forwarding. The supported path is
+host port `8080` through kind and ingress-nginx.
 
 ```bash
-kubectl port-forward -n k8s-go svc/k8s-go-service 8080:80
 TOKEN=$(kubectl get secret -n k8s-go k8s-go-secrets -o jsonpath='{.data.API_TOKEN}' | base64 -d)
 curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/hello
 ```
 
+### Verify the Ingress path
+
+Check each hop from the public controller to the application Pods:
+
+```bash
+kubectl get ingress -n k8s-go
+kubectl describe ingress -n k8s-go k8s-go
+kubectl get svc,endpoints,pods -n k8s-go
+kubectl get svc -n ingress-nginx ingress-nginx-controller
+```
+
+The application Service should remain `ClusterIP`. The
+`ingress-nginx-controller` Service is the `LoadBalancer` that receives the
+MetalLB VIP.
+
 ## Install MetalLB (layer 2)
 
-`EXTERNAL-IP <pending>` is the missing-LB-controller story. [MetalLB](https://metallb.io) is the controller. It watches `Service type=LoadBalancer`, pulls an IP from a pool we own, and gets one node to answer ARP (Address Resolution Protocol) for it. Same `Service` API, no app change.
+`EXTERNAL-IP <pending>` on the `ingress-nginx-controller` Service is the
+missing-LB-controller story. [MetalLB](https://metallb.io) watches that
+`Service type=LoadBalancer`, pulls an IP from a pool we own, and gets one node
+to answer ARP (Address Resolution Protocol) for it. The application remains
+behind its internal `ClusterIP` Service.
 
 ### What MetalLB is
 
@@ -320,7 +397,7 @@ On kind there's no router to peer with, so L2 is the only sensible choice. The "
 
 ### Why this works on kind specifically
 
-The kind node is a Docker container on the `kind` docker bridge network. That bridge is a normal Linux L2 segment — any container joined to it sees ARP from its neighbors. So if MetalLB hands `k8s-go-service` an IP from inside the bridge subnet and a speaker ARPs for it, any container on the same `kind` network can reach it. Outside that bridge (your mac/windows shell, another docker network) the IP is unroutable — same constraint as the NodePort path above.
+The kind node is a Docker container on the `kind` docker bridge network. That bridge is a normal Linux L2 segment — any container joined to it sees ARP from its neighbors. So if MetalLB hands `ingress-nginx-controller` an IP from inside the bridge subnet and a speaker ARPs for it, any container on the same `kind` network can reach it. Outside that bridge (your mac/windows shell, another docker network) the IP is unroutable — same constraint as the NodePort path above.
 
 ### Step 1 — Pick a pool inside the kind subnet
 
@@ -336,7 +413,12 @@ docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}
 
 Pick a range high in the subnet — Docker hands out the low end via its own DHCP and the kind node sits at `.0.2`. The repo's `k8s/metallb-pool.yaml` uses `172.22.255.200-172.22.255.250`. If your subnet differs, edit that line before applying.
 
-**Allocation order is deterministic, not random.** MetalLB walks the pool low-to-high and gives each new `LoadBalancer` Service the first free IP. That's why `k8s-go-service` ends up at `.200` (start of range) and a hypothetical second LB Service would get `.201`. Delete and re-apply → same IP back. Pin a specific one with the annotation `metallb.universe.tf/loadBalancerIPs: 172.22.255.230` if you need stability across pool changes.
+**Allocation order is deterministic, not random.** MetalLB walks the pool
+low-to-high and gives each new `LoadBalancer` Service the first free IP. In
+this project, `ingress-nginx-controller` gets `.200` (the start of the range).
+Delete and re-apply → same IP back. Pin a specific one with the annotation
+`metallb.universe.tf/loadBalancerIPs: 172.22.255.230` if you need stability
+across pool changes.
 
 #### What changes on other cluster managers
 
@@ -403,9 +485,9 @@ kubectl -n metallb-system get ipaddresspool,l2advertisement
 ### Step 5 — Watch `<pending>` flip
 
 ```bash
-kubectl get svc -n k8s-go k8s-go-service -w
+kubectl get svc -n ingress-nginx ingress-nginx-controller -w
 # NAME             TYPE           CLUSTER-IP    EXTERNAL-IP       PORT(S)
-# k8s-go-service   LoadBalancer   10.96.x.x     172.22.255.200    80:31056/TCP
+# ingress-nginx-controller   LoadBalancer   10.96.x.x   172.22.255.200   80:3xxxx/TCP
 ```
 
 The IP comes from `kind-pool`. Reach it from a container on the same docker network:
@@ -422,14 +504,19 @@ docker run --rm --network kind curlimages/curl -sS \
 
 ### Why curl from the host hangs on macOS/Windows
 
-`curl 172.22.255.200` from a macOS/Windows shell hangs — same caveat as NodePort. Docker Desktop runs Docker inside a small Linux VM; the `kind` bridge lives *inside* that VM and the host has no route to it. The ARP reply the speaker sends never reaches your terminal. **Not a bug, not a misconfig** — it's a platform constraint, identical to why `curl <node-ip>:30080` hangs. On native Linux with Docker's bridge driver the bridge sits on the host kernel and the VIP is reachable directly. Real bare-metal MetalLB has no such issue.
+`curl 172.22.255.200` from a macOS/Windows shell hangs — the `kind` bridge
+lives inside Docker Desktop's small Linux VM, and the host has no route to it.
+The ARP reply the speaker sends never reaches your terminal. **Not a bug, not
+a misconfiguration** — it is a platform constraint. On native Linux with
+Docker's bridge driver the bridge sits on the host kernel and the VIP is
+reachable directly. Real bare-metal MetalLB has no such issue.
 
 If you need the VIP reachable from the host shell on macOS/Windows, pick one:
 
 | Option | What it does | Trade-off |
 |---|---|---|
 | `docker run --network kind curlimages/curl …` | Test from a sidecar container on the same bridge | Mirrors how real clients reach an LB (same L2). The lesson. |
-| `kubectl port-forward -n k8s-go svc/k8s-go-service 8080:80` | api-server tunnels to a backing pod | Works anywhere, but skips Service routing — debug only. |
+| `kubectl port-forward -n k8s-go svc/k8s-go-service 18080:80` | api-server tunnels to a backing pod | Works anywhere, but skips Service routing — debug only. |
 | [`cloud-provider-kind`](https://kind.sigs.k8s.io/docs/user/loadbalancer/) | Host-side daemon proxies `LoadBalancer` Services to host ports | Replaces MetalLB for the host-reachability role; closer to what Docker Desktop's built-in LB and `minikube tunnel` do. Mutually exclusive with MetalLB on the same Services. |
 | Linux host (native, Lima, Colima with bridge net) | Host kernel owns the bridge | No extra plumbing. Same as production bare-metal. |
 
@@ -439,7 +526,7 @@ The repo sticks with MetalLB + the sidecar-container test because the goal is to
 
 | Symptom | Cause |
 |---|---|
-| `EXTERNAL-IP` stays `<pending>` after pool apply | No `L2Advertisement` referencing the pool, or pool exhausted. `kubectl describe svc -n k8s-go k8s-go-service` shows the allocator's reason. |
+| `EXTERNAL-IP` stays `<pending>` after pool apply | No `L2Advertisement` referencing the pool, or pool exhausted. `kubectl describe svc -n ingress-nginx ingress-nginx-controller` shows the allocator's reason. |
 | VIP assigned, `curl` from kind-net container times out | speaker pod not Running, or pool range outside the actual kind subnet. Check `docker network inspect kind` again. |
 | `webhook "ipaddresspoolvalidationwebhook.metallb.io" ... connection refused` on first apply | Webhook pod not Ready yet. Retry in ~10 s. |
 | `MountVolume.SetUp failed for volume "memberlist"` on speaker | Controller hasn't created the `memberlist` secret yet. Self-heals once controller is up. |
@@ -456,7 +543,7 @@ Use the Makefile for image loading and deployment:
 kind delete cluster --name k8s-go
 
 # 1. fresh cluster
-kind create cluster --name k8s-go
+make load
 kubectl cluster-info --context kind-k8s-go
 
 # 2. load the app image so kind doesn't try to pull from a registry
@@ -474,19 +561,14 @@ $EDITOR k8s/secret.yaml      # replace API_TOKEN value
 # 6. apply app stack via Kustomize, then the two out-of-kustomization files
 make deploy
 
-# Watch the assigned LoadBalancer address.
-kubectl get svc -n k8s-go k8s-go-service -w
+# Watch the assigned Ingress LoadBalancer address.
+kubectl get svc -n ingress-nginx ingress-nginx-controller -w
 
-VIP=$(kubectl get svc -n k8s-go k8s-go-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+VIP=$(kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 TOKEN=$(kubectl get secret -n k8s-go k8s-go-secrets -o jsonpath='{.data.API_TOKEN}' | base64 -d)
 docker run --rm --network kind curlimages/curl -sS -H "Authorization: Bearer $TOKEN" http://$VIP/hello
 ```
-
-
-### Next step
-
-Add an Ingress controller (`ingress-nginx`) in front of the MetalLB VIP so multiple Services share one external IP via host/path routing.
-
 ## Walkthrough
 
-Step-by-step write-up of how this repo is put together: [yinebebt.com/post/k8s-go-app/](https://yinebebt.com/post/k8s-go-app/)
+Step-by-step write-up of how this repo is put together:
+[yinebebt.com/projects/k8s-go/](https://yinebebt.com/projects/k8s-go/)

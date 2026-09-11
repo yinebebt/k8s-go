@@ -4,10 +4,10 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o main .
 
 FROM alpine:3.21
-RUN apk add --no-cache curl && adduser -D -h /app appuser
+RUN apk add --no-cache curl && addgroup -g 65532 appgroup && adduser -D -u 65532 -G appgroup -h /app appuser
 WORKDIR /app
-COPY --chown=appuser:appuser --from=builder /app/main ./main
-USER appuser
+COPY --chown=65532:65532 --from=builder /app/main ./main
+USER 65532:65532
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 \

@@ -6,26 +6,10 @@ metadata:
   labels:
     app: k8s-go
 spec:
-  type: LoadBalancer
+  type: ClusterIP
   selector:
     app: k8s-go
   ports:
     - protocol: TCP
       port: 80
       targetPort: http
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: k8s-go-nodeport
-  labels:
-    app: k8s-go
-spec:
-  type: NodePort
-  selector:
-    app: k8s-go
-  ports:
-    - protocol: TCP
-      port: 80
-      targetPort: http
-      nodePort: 30080

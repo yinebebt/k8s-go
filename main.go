@@ -16,7 +16,8 @@ import (
 var (
 	version string
 	log     *slog.Logger
-	// loaded from API_TOKEN env (k8s Secret); empty means auth disabled.
+	// Loaded from API_TOKEN env (Kubernetes Secret); empty means all /hello
+	// requests are rejected.
 	apiToken string
 	// ready flips to true once server accepts traffic, false on shutdown
 	isReady atomic.Bool
