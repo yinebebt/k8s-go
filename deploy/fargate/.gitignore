@@ -1,0 +1,4 @@
+.state/
+.passphrase
+Pulumi.*.yaml
+/fargate
