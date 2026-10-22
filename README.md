@@ -568,7 +568,3 @@ VIP=$(kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.s
 TOKEN=$(kubectl get secret -n k8s-go k8s-go-secrets -o jsonpath='{.data.API_TOKEN}' | base64 -d)
 docker run --rm --network kind curlimages/curl -sS -H "Authorization: Bearer $TOKEN" http://$VIP/hello
 ```
-## Walkthrough
-
-Step-by-step write-up of how this repo is put together:
-[yinebebt.com/projects/k8s-go/](https://yinebebt.com/projects/k8s-go/)
